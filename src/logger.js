@@ -3,7 +3,7 @@ import fs from "node:fs";
 export function createLogger(logFile) {
   function write(level, message, extra) {
     const line = JSON.stringify({
-      ts: new Date().toISOString(),
+      ts: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }),
       level,
       message,
       extra: extra ?? null

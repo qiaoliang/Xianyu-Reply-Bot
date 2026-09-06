@@ -273,7 +273,7 @@ function createServiceController() {
       // 重新读取 .env（管理面板可能已经修改过）
       const envPath = path.join(config.paths.projectRoot, ".env");
       if (fs.existsSync(envPath)) {
-        dotenv.config({ path: envPath });
+        dotenv.config({ path: envPath, override: true });
       }
 
       const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
