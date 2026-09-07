@@ -5,6 +5,7 @@ import { startAdminServer } from "./admin.js";
 import { config } from "./config.js";
 import { DeepSeekClient } from "./deepseek.js";
 import { writeHeartbeat } from "./heartbeat.js";
+import { describeStartError, describeWorkerError, isClosedPageError, PAGE_CLOSED_HINT, CLOSED_ERROR_STOP_THRESHOLD } from "./errors.js";
 import { createLogger } from "./logger.js";
 import { loadProductConfig, resolveProductProfile } from "./product-config.js";
 import { assessConversation, normalizeReply } from "./rules.js";
@@ -262,6 +263,9 @@ function createServiceController() {
   let running = false;
   let logger = null;
   let page = null;
+  // 停止原因：stopped_by_user（面板手动停止）/ page_closed（页面被关闭自动停止）
+  let stopReason = null;
+  let consecutiveClosedErrors = 0;
 
   return {
     isRunning() {
@@ -330,7 +334,20 @@ function createServiceController() {
         logger
       );
 
-      await page.start();
+      try {
+        await page.start();
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        const friendly = describeStartError(errMsg);
+        writeHeartbeat(config.paths.heartbeatFile, {
+          status: "idle",
+          autoSend: xianyuCfg.autoSend,
+          pollIntervalMs: xianyuCfg.pollIntervalMs,
+          phase: "start_failed",
+          error: friendly
+        });
+        throw new Error(friendly);
+      }
       writeHeartbeat(config.paths.heartbeatFile, {
         status: "running",
         autoSend: xianyuCfg.autoSend,
@@ -343,6 +360,8 @@ function createServiceController() {
       });
 
       running = true;
+      consecutiveClosedErrors = 0;
+      stopReason = null;
 
       // 工作循环（异步执行，不阻塞 start 返回）
       (async () => {
@@ -509,16 +528,47 @@ function createServiceController() {
             markReplied(state, conversation.id, currentFingerprint);
             saveState(config.paths.stateFile, state);
           } catch (error) {
-            logger.error("Worker loop failed", {
-              message: error instanceof Error ? error.message : String(error)
-            });
-            writeHeartbeat(config.paths.heartbeatFile, {
-              status: "running",
-              autoSend: xianyuCfg.autoSend,
-              pollIntervalMs: xianyuCfg.pollIntervalMs,
-              phase: "error",
-              error: error instanceof Error ? error.message : String(error)
-            });
+            const errMsg = error instanceof Error ? error.message : String(error);
+            if (isClosedPageError(errMsg)) {
+              consecutiveClosedErrors += 1;
+              if (consecutiveClosedErrors >= CLOSED_ERROR_STOP_THRESHOLD) {
+                stopReason = "page_closed";
+                running = false;
+                logger.error("闲鱼页面或浏览器已被关闭，自动停止轮询。请确认没有手动关闭 bot 的 Chrome 窗口，然后在管理面板点击「启动服务」重新开始。", {
+                  message: errMsg,
+                  consecutiveClosedErrors
+                });
+                writeHeartbeat(config.paths.heartbeatFile, {
+                  status: "running",
+                  autoSend: xianyuCfg.autoSend,
+                  pollIntervalMs: xianyuCfg.pollIntervalMs,
+                  phase: "page_closed",
+                  error: PAGE_CLOSED_HINT
+                });
+                break;
+              }
+              logger.error("闲鱼页面或浏览器可能已被关闭，继续重试", {
+                message: errMsg,
+                consecutiveClosedErrors
+              });
+              writeHeartbeat(config.paths.heartbeatFile, {
+                status: "running",
+                autoSend: xianyuCfg.autoSend,
+                pollIntervalMs: xianyuCfg.pollIntervalMs,
+                phase: "page_closing_warn",
+                error: `${PAGE_CLOSED_HINT}\n（若持续出现，服务将自动停止）`
+              });
+            } else {
+              consecutiveClosedErrors = 0;
+              logger.error("Worker loop failed", { message: errMsg });
+              writeHeartbeat(config.paths.heartbeatFile, {
+                status: "running",
+                autoSend: xianyuCfg.autoSend,
+                pollIntervalMs: xianyuCfg.pollIntervalMs,
+                phase: "error",
+                error: describeWorkerError(errMsg)
+              });
+            }
           }
 
           await wait(xianyuCfg.pollIntervalMs);
@@ -528,17 +578,22 @@ function createServiceController() {
         if (page) {
           try { await page.stop(); } catch { /* ignore */ }
         }
-        writeHeartbeat(config.paths.heartbeatFile, {
+        const stoppedHeartbeat = {
           status: "stopped",
           autoSend: xianyuCfg.autoSend,
           pollIntervalMs: xianyuCfg.pollIntervalMs,
-          phase: "stopped_by_user"
-        });
-        logger.info("Auto reply worker stopped");
+          phase: stopReason || "stopped"
+        };
+        if (stopReason === "page_closed") {
+          stoppedHeartbeat.error = PAGE_CLOSED_HINT;
+        }
+        writeHeartbeat(config.paths.heartbeatFile, stoppedHeartbeat);
+        logger.info("Auto reply worker stopped", stopReason ? { reason: stopReason } : null);
       })();
     },
     stop() {
       if (!running) return;
+      stopReason = "stopped_by_user";
       running = false;
     }
   };

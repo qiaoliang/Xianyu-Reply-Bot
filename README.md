@@ -134,6 +134,37 @@ npm start
 
 前往 [DeepSeek 开放平台](https://platform.deepseek.com) 注册并登录，在控制台中创建 API Key。
 
+### Q: 启动服务时报 `Failed to create a ProcessSingleton ... profile is already in use`
+
+**原因**：上次停止服务时，bot 使用的 Chrome 实例没有完全退出，仍占着 `chrome-profile` 目录，导致新实例无法启动。
+
+**解决**：运行一键重启脚本，它会自动清理残留 Chrome 进程并重启服务：
+
+```bash
+bash restart.sh
+```
+
+也可以手动关闭所有使用 `chrome-profile` 的 Chrome 窗口后，再点击面板「启动服务」。
+
+### Q: 运行中日志持续报 `Target page, context or browser has been closed`
+
+**原因**：bot 正在使用的闲鱼页面或浏览器窗口被关闭（例如手动关掉了 bot 的 Chrome 窗口/标签页，或页面崩溃）。
+
+**处理方式**：程序检测到页面被关闭后会给出中文修复提示，并自动停止轮询（连续检测到后约 1 分钟内停止），不再无限刷错误日志。
+
+1. 确认没有手动关闭 bot 的 Chrome 窗口（HEADLESS=false 时窗口可见）；
+2. 在管理面板点击「启动服务」重新开始；
+3. 若提示 Chrome 配置文件被占用，运行 `bash restart.sh` 一键清理并重启。
+
+### Q: 运行中日志持续报 `Could not find conversation list`
+
+**原因**：页面没有渲染出会话列表，通常是闲鱼要求重新登录，或闲鱼页面结构发生变化。
+
+**处理方式**：
+1. 检查 bot 的 Chrome 窗口（HEADLESS=false 时可见），如弹出登录页，请用闲鱼 APP 扫码登录；
+2. 登录后服务会自动恢复；
+3. 若页面已正常登录仍持续报错，说明闲鱼页面结构变了，需要更新 `src/xianyu-page.js` 中的选择器。
+
 ## 建议
 
 - 先把 `AUTO_SEND=false` 跑通，确认页面读取正常

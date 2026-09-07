@@ -1,6 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { describeStartError } from "./errors.js";
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -73,6 +74,10 @@ function buildHtmlPage() {
   pre { background: #fafbfc; padding: 16px; border-radius: 6px; font-size: 13px; overflow-x: auto; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .hidden { display: none !important; }
   .empty { color: #b2bec3; font-size: 14px; padding: 20px 0; text-align: center; }
+  .error-banner { max-width: 1100px; margin: 16px auto 0; padding: 14px 18px; background: #fff5f5; border: 1px solid #f5c6c6; border-left: 4px solid #e74c3c; border-radius: 8px; font-size: 14px; color: #b03a2e; white-space: pre-line; line-height: 1.8; position: relative; }
+  .error-banner .error-banner-title { font-weight: 600; margin-bottom: 4px; }
+  .error-banner .error-banner-close { position: absolute; top: 8px; right: 12px; cursor: pointer; color: #999; font-size: 16px; line-height: 1; padding: 4px; }
+  .error-banner .error-banner-close:hover { color: #555; }
 </style>
 </head>
 <body>
@@ -88,6 +93,11 @@ function buildHtmlPage() {
   <button class="tab" data-tab="settings">系统设置</button>
   <button class="tab" data-tab="status">运行状态</button>
   <button class="tab" data-tab="logs">日志</button>
+</div>
+<div class="error-banner hidden" id="errorBanner">
+  <span class="error-banner-close" onclick="document.getElementById('errorBanner').classList.add('hidden')">✕</span>
+  <div class="error-banner-title" id="errorBannerTitle">启动失败</div>
+  <div id="errorBannerBody"></div>
 </div>
 <div class="main">
 
@@ -331,6 +341,42 @@ function esc(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
 
+const PHASE_LABELS = {
+  "admin_ready": "待启动（面板就绪）",
+  "idle": "空闲",
+  "start_failed": "启动失败",
+  "started": "已启动",
+  "polling": "轮询中",
+  "reply_sent": "已回复",
+  "holding_reply_sent": "已回复（占位）",
+  "error": "运行出错",
+  "page_closing_warn": "页面可能被关闭（重试中）",
+  "page_closed": "页面被关闭（已自动停止）",
+  "stopped": "已停止",
+  "stopped_by_user": "已手动停止",
+  "signal": "已停止（收到信号）",
+  "fatal": "异常退出"
+};
+
+const STATUS_LABELS = {
+  "running": "运行中",
+  "stopped": "已停止",
+  "idle": "待启动"
+};
+
+// 持久显示错误/修复提示横幅（toast 只做短暂反馈，详细指引用横幅）
+function showErrorBanner(title, body) {
+  const el = $("#errorBanner");
+  if (!el) return;
+  $("#errorBannerTitle").textContent = title || "提示";
+  $("#errorBannerBody").textContent = body || "";
+  el.classList.remove("hidden");
+}
+function hideErrorBanner() {
+  const el = $("#errorBanner");
+  if (el) el.classList.add("hidden");
+}
+
 $("#btnAddProduct").addEventListener("click", () => {
   editingIndex = -1;
   $("#editTitle").textContent = "添加商品";
@@ -429,13 +475,13 @@ async function fetchHeartbeat() {
       return;
     }
     let html = "<div class='kv'>";
-    html += "<div class='kv-item'><strong>状态</strong><span class='status-badge " + (data.status || "stopped") + "'>" + (data.status || "-") + "</span></div>";
-    html += "<div class='kv-item'><strong>阶段</strong>" + (data.phase || "-") + "</div>";
+    html += "<div class='kv-item'><strong>状态</strong><span class='status-badge " + (data.status || "stopped") + "'>" + (STATUS_LABELS[data.status] || data.status || "-") + "</span></div>";
+    html += "<div class='kv-item'><strong>阶段</strong>" + (PHASE_LABELS[data.phase] || data.phase || "-") + "</div>";
     html += "<div class='kv-item'><strong>自动发送</strong>" + (data.autoSend ? "是" : "否") + "</div>";
     html += "<div class='kv-item'><strong>轮询间隔</strong>" + (data.pollIntervalMs || "-") + "ms</div>";
     html += "<div class='kv-item'><strong>最后对话</strong>" + (data.lastConversationId || "-") + "</div>";
     html += "<div class='kv-item'><strong>最后回复</strong>" + (data.lastReply || "-") + "</div>";
-    if (data.error) html += "<div class='kv-item'><strong>错误</strong><span style='color:#e74c3c'>" + esc(data.error) + "</span></div>";
+    if (data.error) html += "<div class='kv-item' style='width:100%'><strong>错误 / 修复提示</strong><div style='color:#b03a2e;font-size:13px;white-space:pre-line;background:#fff5f5;border:1px solid #f5c6c6;border-radius:6px;padding:10px 12px;margin-top:4px;'>" + esc(data.error) + "</div></div>";
     html += "<div class='kv-item'><strong>时间</strong>" + (data.ts || "-") + "</div>";
     html += "</div>";
     $("#heartbeatInfo").innerHTML = html;
@@ -443,7 +489,7 @@ async function fetchHeartbeat() {
     if (data.status === "running") {
       statusEl.innerHTML = '<span class="status-badge running">运行中</span>';
     } else {
-      statusEl.innerHTML = '<span class="status-badge stopped">' + (data.status || "已停止") + '</span>';
+      statusEl.innerHTML = '<span class="status-badge stopped">' + (STATUS_LABELS[data.status] || data.status || "已停止") + '</span>';
     }
   } catch (e) {
     $("#heartbeatInfo").innerHTML = "<div class='empty'>加载失败</div>";
@@ -573,6 +619,7 @@ async function updateServiceUI() {
     btn.className = "btn btn-warning";
     btn.style.cssText = "padding:8px 24px;font-size:15px;";
     statusEl.innerHTML = '<span class="status-badge running">运行中</span>';
+    hideErrorBanner();
   } else {
     btn.textContent = "启动服务";
     btn.className = "btn btn-success";
@@ -601,11 +648,14 @@ $("#btnServiceToggle").addEventListener("click", async () => {
       const data = await res.json();
       if (res.ok) {
         toast(data.message || "服务已启动", "success");
+        hideErrorBanner();
       } else {
-        toast("启动失败: " + (data.error || ""), "error");
+        toast("启动失败", "error");
+        showErrorBanner("启动失败", data.error || "未知错误");
       }
     } catch (e) {
-      toast("启动失败: " + e.message, "error");
+      toast("启动失败", "error");
+      showErrorBanner("启动失败", e.message || "");
     }
     btn.disabled = false;
   }
@@ -697,7 +747,9 @@ export function startAdminServer(projectRoot, serviceController) {
           await serviceController.start();
           jsonResponse(res, 200, { ok: true, message: "服务已启动" });
         } catch (e) {
-          jsonResponse(res, 500, { error: e.message });
+          const raw = e instanceof Error ? e.message : String(e);
+          const friendly = describeStartError(raw);
+          jsonResponse(res, 500, { error: friendly, raw });
         }
         return;
       }
